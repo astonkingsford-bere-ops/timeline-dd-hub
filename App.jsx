@@ -321,7 +321,7 @@ function SendModal(p){
 
   function genAI(){
     setAiLoading(true);
-    fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:600,messages:[{role:"user",content:"Write a professional due diligence invitation email from Timeline to "+company.name+" at "+company.contactEmail+". Access code: "+code+". Portal: "+url+". Keep under 180 words. Return ONLY JSON with keys subject and body (plain text, use \\n for line breaks)."}]})})
+    fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:600,messages:[{role:"user",content:"Write a professional due diligence invitation email from Timeline to "+company.name+" at "+company.contactEmail+". Access code: "+code+". Portal: "+url+". Keep under 180 words. Return ONLY JSON with keys subject and body (plain text, use \\n for line breaks)."}]})})
       .then(function(r){return r.json();}).then(function(d){var t=d.content.map(function(b){return b.text||"";}).join("").replace(/```json|```/g,"").trim();var parsed=JSON.parse(t);setAiSubject(parsed.subject||"");setAiBody(parsed.body||"");})
       .catch(function(){setAiSubject("Due Diligence Questionnaire - "+company.name);setAiBody("Dear "+company.name+",\n\nPlease complete our due diligence questionnaire.\n\nAccess code: "+code+"\nPortal: "+url+"\n\nKind regards,\nTimeline Compliance");})
       .finally(function(){setAiLoading(false);});
@@ -697,7 +697,7 @@ function AIAssistant(p){
     var ctx=populatedCompanies.length>0?buildCtx(populatedCompanies,p.allData):"No platform questionnaire data has been imported yet.";
     var sys="You are Mark, a senior compliance and DD specialist at Timeline (UK FCA-regulated). Be concise and direct. Answer in plain English. If data is missing, say so.\n\nPlatform questionnaire data:\n"+ctx;
     var apiMsgs=messages.filter(function(m){return m.content!==WELCOME;}).concat([{role:"user",content:text}]).slice(-10);
-    fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:1000,system:sys,messages:apiMsgs})})
+    fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:1000,system:sys,messages:apiMsgs})})
       .then(function(r){return r.json();})
       .then(function(d){
         var reply="";
@@ -995,7 +995,7 @@ function SheetSync(p){
     var companyList=p.companies.map(function(c){return c.name;}).join(", ");
     var sample=headers.slice(0,20).map(function(h,i){return h+": "+(firstRow[i]||"(blank)");}).join("\n");
     var prompt="You are helping identify which company from a known list filled in a due diligence Google Form.\n\nKnown companies: "+companyList+"\n\nSpreadsheet title: \""+sheetTitle+"\"\n\nFirst response row (header: answer):\n"+sample+"\n\nReturn ONLY valid JSON with keys: company (exact name from the list, or null if unclear), confidence (high/medium/low), reason (one sentence).";
-    var res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:200,messages:[{role:"user",content:prompt}]})});
+    var res=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:200,messages:[{role:"user",content:prompt}]})});
     var d=await res.json();
     var txt=d.content.map(function(b){return b.text||"";}).join("").replace(/```json|```/g,"").trim();
     return JSON.parse(txt);
@@ -1004,7 +1004,7 @@ function SheetSync(p){
   // ── AI: map columns to questionnaire fields ──────────────────────────────
   async function aiMapColumns(headers){
     var qList=allQs.map(function(q){return q.id+": "+q.label.slice(0,80);}).join("\n");
-    var res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:"Map these Google Forms headers to field IDs. Return ONLY valid JSON. Keys are headers, values are field IDs, empty string if no match. Skip Timestamp and email columns.\n\nHEADERS:\n"+headers.join("\n")+"\n\nFIELDS:\n"+qList}]})});
+    var res=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:2000,messages:[{role:"user",content:"Map these Google Forms headers to field IDs. Return ONLY valid JSON. Keys are headers, values are field IDs, empty string if no match. Skip Timestamp and email columns.\n\nHEADERS:\n"+headers.join("\n")+"\n\nFIELDS:\n"+qList}]})});
     var d=await res.json();
     var txt=d.content.map(function(b){return b.text||"";}).join("").replace(/```json|```/g,"").trim();
     return JSON.parse(txt);
@@ -1260,21 +1260,27 @@ function SheetSync(p){
 
 function SettingsView(p){
   var[editing,setEditing]=useState(null);var[editVal,setEditVal]=useState("");
-  var[testState,setTestState]=useState("idle");
+  var[serpKey,setSerpKey]=useState(function(){return lsGet(SK+"_serp","");});
+  var[showSerp,setShowSerp]=useState(false);
+  var[testState,setTestState]=useState("idle"); // idle | testing | ok | fail
   var[testMsg,setTestMsg]=useState("");
+  useEffect(function(){lsSet(SK+"_serp",serpKey);},[serpKey]);
 
   async function testConnection(){
+    if(!serpKey.trim())return;
     setTestState("testing");setTestMsg("");
     try{
-      var res=await fetch("/api/health");
+      var workerUrl="https://timeline-dd-proxy.aston-kingsford-bere.workers.dev/";
+      var url=workerUrl+"?q="+encodeURIComponent("FCA register UK")+"&key="+encodeURIComponent(serpKey.trim())+"&num=1";
+      var res=await fetch(url);
       if(!res.ok)throw new Error("HTTP "+res.status);
       var data=await res.json();
-      if(!data.serpConfigured)throw new Error("SERP_API_KEY not set on server — add it to your environment variables");
+      if(data.error)throw new Error(data.error);
       setTestState("ok");
-      setTestMsg("Connection successful — live web search is active and ready for board reports.");
+      setTestMsg("Connection successful — live web search is working and ready for board reports.");
     }catch(e){
       setTestState("fail");
-      setTestMsg("Failed: "+e.message);
+      setTestMsg("Failed: "+e.message+". Check your SerpAPI key is correct.");
     }
   }
 
@@ -1283,18 +1289,31 @@ function SettingsView(p){
     <div style={{flex:1,padding:"1.75rem 2rem",overflowY:"auto",background:C.grayL}}>
       <div style={{marginBottom:"1.5rem"}}><h1 style={{fontSize:22,fontWeight:700,margin:"0 0 3px",color:C.navy}}>{"Settings"}</h1><p style={{fontSize:13,color:C.gray,margin:0}}>{"Manage provider contacts, Google Sheets sync, and portal data."}</p></div>
 
-      {/* Web research status */}
+      {/* SerpAPI key — powers Board Report web research */}
       <div style={{marginBottom:"1.5rem"}}>
         <div style={{fontSize:11,fontWeight:600,color:C.gray,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:10}}>{"Board report — web research"}</div>
-        <div style={{background:"white",border:"1px solid "+C.grayM,borderRadius:12,padding:"16px 18px",display:"flex",alignItems:"center",gap:14}}>
-          <div style={{flex:1}}>
-            <div style={{fontSize:13,fontWeight:600,color:C.navy,marginBottom:3}}>{"FCA register, Companies House & web search"}</div>
-            <div style={{fontSize:12,color:C.gray,lineHeight:1.6}}>{"The SerpAPI key is configured on the server. Click Test to confirm live searches are working."}</div>
+        <div style={{background:"white",border:"1px solid "+C.grayM,borderRadius:12,padding:"16px 18px"}}>
+          <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,marginBottom:12}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:600,color:C.navy,marginBottom:3}}>{"SerpAPI key"}</div>
+              <div style={{fontSize:12,color:C.gray,lineHeight:1.6}}>{"Used by the Board Report agent to search the FCA register, Companies House, and the web for each platform. Free tier: 100 searches/month — no card required."}</div>
+            </div>
+            <a href="https://serpapi.com" target="_blank" rel="noreferrer" style={{fontSize:12,color:C.blue,whiteSpace:"nowrap",marginTop:2,textDecoration:"none",flexShrink:0}}>{"Get free key →"}</a>
           </div>
-          <div style={{flexShrink:0,display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
-            <Btn size="sm" variant={testState==="ok"?"teal":testState==="fail"?"danger":"primary"} onClick={testConnection}>{testState==="testing"?"Testing...":testState==="ok"?"✓ Connected":testState==="fail"?"Retry":"Test connection"}</Btn>
-            {testMsg&&<div style={{fontSize:11,color:testState==="ok"?C.greenD:C.redD,maxWidth:260,textAlign:"right"}}>{testMsg}</div>}
+          <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10}}>
+            <input
+              type={showSerp?"text":"password"}
+              value={serpKey}
+              onChange={function(e){setSerpKey(e.target.value);setTestState("idle");setTestMsg("");}}
+              placeholder={"Paste your SerpAPI key here..."}
+              style={{...fldSt,flex:1}}
+            />
+            <Btn size="sm" variant="soft" onClick={function(){setShowSerp(function(v){return !v;});}}>{showSerp?"Hide":"Show"}</Btn>
+            <Btn size="sm" variant={testState==="ok"?"teal":testState==="fail"?"danger":"primary"} onClick={testConnection}>{testState==="testing"?"Testing...":testState==="ok"?"✓ Connected":testState==="fail"?"Failed — retry":"Test connection"}</Btn>
           </div>
+          {testMsg&&<div style={{fontSize:12,padding:"8px 12px",borderRadius:7,background:testState==="ok"?C.greenL:C.redL,color:testState==="ok"?C.greenD:C.redD,border:"1px solid "+(testState==="ok"?"#BBF7D0":"#FECACA")}}>{testMsg}</div>}
+          {!testMsg&&serpKey&&<div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:C.green}}/><span style={{fontSize:11,color:C.greenD,fontWeight:500}}>{"Key saved — click Test connection to verify it works"}</span></div>}
+          {!serpKey&&<div style={{display:"flex",alignItems:"center",gap:6}}><div style={{width:6,height:6,borderRadius:"50%",background:C.amber}}/><span style={{fontSize:11,color:C.amberD}}>{"No key set — Board Report will use questionnaire data only"}</span></div>}
         </div>
       </div>
 
@@ -1420,7 +1439,7 @@ function CsvImporter(p){
       var qList=allQs.map(function(q){return q.id+": "+q.label.slice(0,80);}).join("\n");
       var latestRow=parsed.rows[parsed.rows.length-1];
 
-      fetch("https://api.anthropic.com/v1/messages",{
+      fetch("/api/claude",{
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({
@@ -1653,11 +1672,13 @@ function BoardReport(p){
   function toggleAll(){if(selected.length===p.companies.length)setSelected([]);else setSelected(p.companies.map(function(c){return c.id;}));}
   function toggle(id){setSelected(function(prev){return prev.includes(id)?prev.filter(function(x){return x!==id;}):prev.concat([id]);});}
 
+  var serpApiKey=lsGet(SK+"_serp","");
+
   async function serpSearch(query){
-    // In production the API server handles SerpAPI calls (no CORS issues)
-    var url="/api/search?q="+encodeURIComponent(query)+"&num=5";
+    var workerUrl="https://timeline-dd-proxy.aston-kingsford-bere.workers.dev/";
+    var url=workerUrl+"?q="+encodeURIComponent(query)+"&key="+encodeURIComponent(serpApiKey)+"&num=5";
     var res=await fetch(url);
-    if(!res.ok)throw new Error("Search API returned HTTP "+res.status);
+    if(!res.ok)throw new Error("Worker returned HTTP "+res.status);
     var data=await res.json();
     if(data.error)throw new Error(data.error);
     var results=(data.organic_results||[]).slice(0,5);
@@ -1666,7 +1687,9 @@ function BoardReport(p){
   }
 
   async function researchPlatform(company,fd){
-
+    if(!serpApiKey){
+      return "No SerpAPI key set — add one in Settings to enable live web research.";
+    }
     var fcaRef=fd.e_fca_ref||"";
     var name=company.name;
 
@@ -1686,7 +1709,7 @@ function BoardReport(p){
     // Ask Claude to synthesise the raw results into a clean summary
     var prompt="Summarise the following web search results about '"+name+"' for a compliance due diligence report. Be factual and concise (150 words max). Include: FCA authorisation status and reference number if found, Companies House registration status, any regulatory actions or fines. If information is not found in the results, say so clearly.\n\nFCA Register results:\n"+fcaResults+"\n\nCompanies House results:\n"+chResults+"\n\nRegulatory news results:\n"+newsResults;
 
-    var res=await fetch("https://api.anthropic.com/v1/messages",{
+    var res=await fetch("/api/claude",{
       method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({
@@ -1734,7 +1757,7 @@ function BoardReport(p){
       var qs=allQs.filter(function(q){return e.fd[q.id];}).map(function(q){return q.label+": "+String(e.fd[q.id]).slice(0,180);}).join("\n");
       return"=== "+e.company.name+" ===\nDD: "+st.pct+"% | Risk: "+risk+"\nOutstanding: "+(outstanding.length?outstanding.join(", "):"None")+"\nExternal research:\n"+e.findings+"\nQuestionnaire:\n"+qs;
     }).join("\n\n");
-    var res=await fetch("https://api.anthropic.com/v1/messages",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,messages:[{role:"user",content:"Produce a professional board-level due diligence report for Timeline, a UK FCA-regulated financial planning firm.\n\nDate: "+reportDate+"\nPlatforms: "+chosen.map(function(c){return c.name;}).join(", ")+"\n\nStructure:\n1. EXECUTIVE SUMMARY (3-4 sentences: overall status, key risks, recommended actions)\n2. PORTFOLIO OVERVIEW (all platforms: completion %, risk rating, FCA status)\n3. PLATFORM-BY-PLATFORM FINDINGS (each platform: DD status, risk, outstanding items, questionnaire findings, FCA/CH/web research)\n4. KEY RISKS & RED FLAGS (cross-platform risks needing board attention)\n5. RECOMMENDED ACTIONS (prioritised list with suggested owners and timescales)\n6. REGULATORY CONTEXT (FCA Consumer Duty and SYSC 8 obligations this review addresses)\n\nTone: professional, factual, board-appropriate. Name platforms when flagging risks. Be specific.\n\nData:\n\n"+ctx}]})}).catch(function(){return null;});
+    var res=await fetch("/api/claude",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:4000,messages:[{role:"user",content:"Produce a professional board-level due diligence report for Timeline, a UK FCA-regulated financial planning firm.\n\nDate: "+reportDate+"\nPlatforms: "+chosen.map(function(c){return c.name;}).join(", ")+"\n\nStructure:\n1. EXECUTIVE SUMMARY (3-4 sentences: overall status, key risks, recommended actions)\n2. PORTFOLIO OVERVIEW (all platforms: completion %, risk rating, FCA status)\n3. PLATFORM-BY-PLATFORM FINDINGS (each platform: DD status, risk, outstanding items, questionnaire findings, FCA/CH/web research)\n4. KEY RISKS & RED FLAGS (cross-platform risks needing board attention)\n5. RECOMMENDED ACTIONS (prioritised list with suggested owners and timescales)\n6. REGULATORY CONTEXT (FCA Consumer Duty and SYSC 8 obligations this review addresses)\n\nTone: professional, factual, board-appropriate. Name platforms when flagging risks. Be specific.\n\nData:\n\n"+ctx}]})}).catch(function(){return null;});
     if(!res){setPhase("error");return;}
     var d=await res.json();
     if(d.error){setPhase("error");setReport("Error: "+d.error.message);return;}
